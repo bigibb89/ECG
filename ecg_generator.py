@@ -1,88 +1,81 @@
 import os
 import wfdb
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
 import logging
-import traceback
+from tqdm import tqdm
 
-# הגדרות לוג
+# הגדרות
+DATA_DIR = 'ptbxl'
+OUTPUT_IMG_DIR = 'ecg_images'
+OUTPUT_CSV = 'ecg_quiz.csv'
+SAMPLING_RATE = 100  # 100Hz ב-PTB-XL
+NUM_QUESTIONS = 1000  # מספר השאלות ליצירה
+
+# הגדרת לוגים
 logging.basicConfig(
-    filename='ecg_generator.log',
-    level=logging.ERROR,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    filename='logs/ecg_generator.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-# הגדרות נתונים
-DATA_DIR = 'data/ptbxl'
-OUTPUT_IMG_DIR = 'data/ecg_images'
-CSV_PATH = 'data/ptbxl/ptbxl_database.csv'
-QUIZ_CSV = 'data/ecg_quiz.csv'
-SAMPLING_RATE = 100
-NUM_QUESTIONS = 1000
+logging.info("התחלת הרצת הקוד.")
 
 # צור תיקיית תמונות
 os.makedirs(OUTPUT_IMG_DIR, exist_ok=True)
-
-# טען מטא-דאטה
-try:
-    metadata = pd.read_csv(CSV_PATH)
-except FileNotFoundError:
-    logging.critical(f"קובץ המטא-דאטה לא נמצא: {CSV_PATH}")
-    raise
+logging.info(f"תיקיית התמונות '{OUTPUT_IMG_DIR}' נוצרה או כבר קיימת.")
 
 # --------------------------------------------------
 # פונקציה ליצירת תמונת אק"ג
 # --------------------------------------------------
 def save_ecg_plot(record_id):
     try:
-        subfolder = f"{int(record_id) // 1000 * 1000:05d}"
-        full_path = os.path.join(DATA_DIR, "records100", subfolder, f"{record_id}_lr")
+        # טען את הנתונים
+        record = wfdb.rdrecord(os.path.join(DATA_DIR, f'records100/{record_id}_hr'))
+        logging.info(f"טעינת רשומת אק'ג {record_id} הצליחה.")
         
-        record = wfdb.rdrecord(full_path)
+        # צור את הפלטה
+        plt.figure(figsize=(10, 6))
+        plt.plot(record.p_signal)
+        plt.axis('off')
         
-        # יצירת הגרף
-        fig, axes = plt.subplots(12, 1, figsize=(10, 15))
-        colors = plt.cm.viridis(np.linspace(0, 1, 12))
-        
-        for i, ax in enumerate(axes):
-            ax.plot(record.p_signal[:, i], color=colors[i], linewidth=0.8)
-            ax.set_title(f'Lead {record.sig_name[i]}', fontsize=8, pad=2)
-            ax.axis('off')
-        
-        img_path = os.path.join(OUTPUT_IMG_DIR, f"{record_id}_lr.png")
+        # שמור כתמונה
+        img_path = os.path.join(OUTPUT_IMG_DIR, f"{record_id}.png")
         plt.savefig(img_path, bbox_inches='tight', dpi=150)
         plt.close()
-        return img_path
+        logging.info(f"תמונת אק'ג נשמרה ב-{img_path}.")
         
+        return img_path
     except Exception as e:
-        logging.error(f"שגיאה ביצירת תמונה ל-{record_id}:\n{traceback.format_exc()}")
+        logging.error(f"שגיאה ביצירת תמונת אק'ג עבור {record_id}: {e}")
         return None
 
 # --------------------------------------------------
-# פונקציה ליצירת שאלות
+# פונקציה ליצירת שאלה
 # --------------------------------------------------
 def generate_quiz_entry(record):
     try:
+        # אבחנה ראשית
         diagnosis = record['diagnosis_superclass']
+        
+        # צור 3 מסיחים מאותה קטגוריה
         same_class = metadata[metadata['diagnosis_superclass'] == diagnosis]
+        distractors = same_class.sample(3)['diagnosis_superclass'].unique().tolist()
         
-        # יצירת מסיחים
-        if len(same_class) >= 3:
-            distractors = same_class.sample(3)['diagnosis_superclass'].tolist()
-        else:
-            distractors = same_class['diagnosis_superclass'].tolist()
-            distractors += metadata[~metadata.index.isin(same_class.index)].sample(3 - len(distractors))['diagnosis_superclass'].tolist()
+        # השלם ל-3 מסיחים אם חסר
+        while len(distractors) < 3:
+            distractors.append(metadata.sample(1)['diagnosis_superclass'].values[0])
         
+        # ערבב את האפשרויות
         options = distractors + [diagnosis]
         np.random.shuffle(options)
         
+        # צור תמונה
         img_path = save_ecg_plot(str(record['ecg_id']))
-        if not img_path:
+        
+        if img_path is None:
+            logging.warning(f"לא ניתן ליצור תמונה עבור {record['ecg_id']}.")
             return None
-            
+        
         return {
             'ecg_id': record['ecg_id'],
             'image_path': img_path,
@@ -90,40 +83,36 @@ def generate_quiz_entry(record):
             'options': options,
             'correct_answer': diagnosis
         }
-        
     except Exception as e:
-        logging.error(f"שגיאה ביצירת שאלה ל-{record['ecg_id']}:\n{traceback.format_exc()}")
+        logging.error(f"שגיאה ביצירת שאלה עבור {record['ecg_id']}: {e}")
         return None
+
+# --------------------------------------------------
+# טען מטא-דאטה
+# --------------------------------------------------
+try:
+    metadata = pd.read_csv(os.path.join(DATA_DIR, 'ptbxl_database.csv'))
+    logging.info("מטא-דאטה נטען בהצלחה.")
+except Exception as e:
+    logging.error(f"שגיאה בטעינת מטא-דאטה: {e}")
+    raise
 
 # --------------------------------------------------
 # יצירת המאגר
 # --------------------------------------------------
 quiz_data = []
-error_count = 0
 
+# עבור על הנתונים עם סרגל התקדמות
+for _, row in tqdm(metadata.sample(NUM_QUESTIONS).iterrows(), total=NUM_QUESTIONS):
+    quiz_entry = generate_quiz_entry(row)
+    if quiz_entry:
+        quiz_data.append(quiz_entry)
+
+# שמור ל-CSV
 try:
-    for _, row in tqdm(metadata.sample(NUM_QUESTIONS).iterrows(), total=NUM_QUESTIONS):
-        quiz_entry = generate_quiz_entry(row)
-        if quiz_entry:
-            quiz_data.append(quiz_entry)
-        else:
-            error_count += 1
-            
+    pd.DataFrame(quiz_data).to_csv(OUTPUT_CSV, index=False)
+    logging.info(f"נשמרו {len(quiz_data)} שאלות ב-{OUTPUT_CSV}.")
 except Exception as e:
-    logging.critical(f"שגיאה כללית:\n{traceback.format_exc()}")
-    raise
+    logging.error(f"שגיאה בשמירת קובץ CSV: {e}")
 
-finally:
-    # מניעת יצירת קובץ ריק
-    if quiz_data:
-        try:
-            pd.DataFrame(quiz_data).to_csv(QUIZ_CSV, index=False)
-            logging.info(f"נשמרו {len(quiz_data)} שאלות (שגיאות: {error_count})")
-        except Exception as e:
-            logging.critical(f"שגיאה בשמירת הקובץ:\n{traceback.format_exc()}")
-    else:
-        logging.critical("לא נוצרו שאלות - קובץ לא נשמר!")
-        if os.path.exists(QUIZ_CSV):
-            os.remove(QUIZ_CSV)  # מחק קובץ ריק אם נוצר
-
-    print(f"סיום עם {len(quiz_data)} שאלות מוצלחות ו-{error_count} שגיאות")
+logging.info("סיום הרצת הקוד.")
